@@ -51,8 +51,7 @@
         "type": "string",
         "description": "匹配到关键词后发送语音的方式",
         "default": "first",
-        "options": ["first", "random", "all"],
-        "hint": "first: 只发列表中第一个；random: 随机发一个；all: 全部发"
+        "enum": ["first", "random", "all"]
       },
       "max_per_message": {
         "type": "integer",
@@ -65,7 +64,12 @@
         "type": "object",
         "description": "关键词 → 语音名称列表 的映射",
         "default": {},
-        "hint": "key 是文本中要检测的口癖字符串，value 是语音名称数组（必须已在 voice_map 中存在）。例：\"哎嘿~\": [\"哎嘿短\", \"哎嘿长版\"]"
+        "additionalProperties": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   }
