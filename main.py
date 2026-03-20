@@ -2,9 +2,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 import re
 import random
+
 import aiohttp
 from pydantic import Field
 from pydantic.dataclasses import dataclass
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter, MessageChain
 from astrbot.api.message_components import Record, Reply
@@ -13,6 +15,7 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
+
 ALLOWED_EXT = {".mp3", ".wav", ".ogg", ".silk", ".amr"}
 PAGE_SIZE = 15
 
@@ -20,6 +23,7 @@ PAGE_SIZE = 15
 @dataclass
 class AiriListAllVoicesTool(FunctionTool[AstrAgentContext]):
     """列出当前插件中所有可用的语音名称。"""
+
     name: str = "airi_list_all_voices"
     description: str = "列出本插件加载的全部语音名称，供 LLM 选择使用。"
     parameters: dict = Field(
@@ -34,10 +38,13 @@ class AiriListAllVoicesTool(FunctionTool[AstrAgentContext]):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
+        # 仅在插件触发模式为 llm 时生效，其他模式下工具只返回给 LLM 的提示文本
         if not self.plugin or getattr(self.plugin, "trigger_mode", None) != "llm":
             return "当前未开启 LLM 触发模式，本工具暂不可用。"
+
         if not self.plugin.voice_map:
             return "当前没有可用语音。"
+
         names = sorted(self.plugin.voice_map.keys())
         return "当前可用语音名称列表：\n" + "\n".join(names)
 
@@ -45,8 +52,11 @@ class AiriListAllVoicesTool(FunctionTool[AstrAgentContext]):
 @dataclass
 class AiriSearchVoicesTool(FunctionTool[AstrAgentContext]):
     """根据关键词筛选语音名称。"""
+
     name: str = "airi_search_voices"
-    description: str = "根据用户给出的关键词，在本插件的语音库中筛选匹配的语音名称。"
+    description: str = (
+        "根据用户给出的关键词，在本插件的语音库中筛选匹配的语音名称。"
+    )
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
@@ -66,28 +76,38 @@ class AiriSearchVoicesTool(FunctionTool[AstrAgentContext]):
     ) -> ToolExecResult:
         if not self.plugin or getattr(self.plugin, "trigger_mode", None) != "llm":
             return "当前未开启 LLM 触发模式，本工具暂不可用。"
+
         if not self.plugin.voice_map:
             return "当前没有可用语音。"
+
         keyword = (kwargs.get("keyword") or "").strip()
         if not keyword:
             return "请提供要搜索的语音关键词。"
+
         keyword_lower = keyword.lower()
         matched = [
             name
             for name in self.plugin.voice_map.keys()
             if keyword_lower in name.lower()
         ]
+
         if not matched:
             return f"未找到包含「{keyword}」的语音名称。"
+
         matched.sort()
-        return f"根据关键词「{keyword}」筛选到的语音名称：\n" + "\n".join(matched)
+        return (
+            f"根据关键词「{keyword}」筛选到的语音名称：\n" + "\n".join(matched)
+        )
 
 
 @dataclass
 class AiriSendVoiceTool(FunctionTool[AstrAgentContext]):
     """根据指定名称直接向当前会话发送语音。"""
+
     name: str = "airi_send_voice"
-    description: str = "根据指定的语音名称，直接向当前会话发送对应的语音消息。"
+    description: str = (
+        "根据指定的语音名称，直接向当前会话发送对应的语音消息。"
+    )
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
@@ -107,28 +127,36 @@ class AiriSendVoiceTool(FunctionTool[AstrAgentContext]):
     ) -> ToolExecResult:
         if not self.plugin or getattr(self.plugin, "trigger_mode", None) != "llm":
             return "当前未开启 LLM 触发模式，本工具暂不可用。"
+
         if not self.plugin.voice_map:
             return "当前没有可用语音。"
+
         name = (kwargs.get("name") or "").strip()
         if not name:
             return "请提供要发送的语音名称。"
+
         path = self.plugin.voice_map.get(name)
         if not path:
             return f"语音「{name}」不存在，请先使用列出/搜索工具确认可用名称。"
+
+        # 在 Tool 内部直接发送语音消息（对用户来说仍然是一次回复中的语音）
         try:
             agent_ctx = context.context.context
             event = context.context.event
         except Exception:
             agent_ctx = None
             event = None
+
         if agent_ctx is None or event is None:
             return f"无法获取当前会话上下文，未能发送语音「{name}」。"
+
         try:
             await agent_ctx.send_message(
                 event.unified_msg_origin,
                 MessageChain([Record.fromFileSystem(path)]),
             )
             logger.debug(f"[AiriVoice] LLM 工具发送语音：'{name}' → {path}")
+            # 不再给用户增加额外文字，只让 LLM 负责一句话内容
             return ""
         except FileNotFoundError as e:
             logger.error(f"[AiriVoice] 文件不存在（LLM 工具） '{name}': {e}")
@@ -148,28 +176,37 @@ class AiriSendVoiceTool(FunctionTool[AstrAgentContext]):
 class AiriVoice(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
-
+        
+        # 路径初始化
         self.plugin_dir = Path(__file__).parent
         self.voice_dir = self.plugin_dir / "voices"
         self.voice_dir.mkdir(parents=True, exist_ok=True)
-
+        
+        # 使用 StarTools 获取数据目录（持久化）
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_airi_voice")
+        self.auto_reply_voice_enabled = self.config.get("auto_reply_voice_on_bot_message", False)
+        # 用户添加的语音保存目录（重启不丢）
         self.user_added_dir = self.data_dir / "user_added"
         self.user_added_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 网页上传目录
         self.extra_voice_dir = self.data_dir / "extra_voices"
         self.extra_voice_dir.mkdir(parents=True, exist_ok=True)
-
+        
         logger.info(f"[AiriVoice] 数据目录：{self.data_dir}")
-
+        
+        # 配置
         self.config = config or {}
         self.trigger_mode = self.config.get("trigger_mode", "direct")
         if self.trigger_mode not in {"prefix", "direct", "llm"}:
+            logger.warning(f"[AiriVoice] 无效 trigger_mode，强制使用 direct")
             self.trigger_mode = "direct"
-
+        
+        # 权限控制
         self.admin_mode = self.config.get("admin_mode", "whitelist")
         if self.admin_mode not in {"all", "admin", "whitelist"}:
             self.admin_mode = "whitelist"
-
+        
         whitelist_raw = self.config.get("admin_whitelist", "")
         if isinstance(whitelist_raw, str):
             self.admin_whitelist: Set[str] = set(
@@ -180,23 +217,30 @@ class AiriVoice(Star):
         else:
             self.admin_whitelist: Set[str] = set()
 
+        # LLM 语音选择模式
         self.llm_select_mode = self.config.get("llm_select_mode", "list")
         if self.llm_select_mode not in {"list", "keyword"}:
+            logger.warning(
+                f"[AiriVoice] 无效 llm_select_mode，强制使用 list"
+            )
             self.llm_select_mode = "list"
-
-        # 新增：bot 自发消息自动追发语音 开关
-        self.auto_reply_voice_enabled = self.config.get("auto_reply_voice_on_bot_message", False)
-
+        
+        # 语音映射
         self.voice_map: Dict[str, str] = {}
         self.sorted_keys: List[str] = []
-
-        self._load_local_voices()
-        self._load_user_added_voices()
-        self._load_web_voices(self.config)
+        
+        # 加载所有语音
+        self._load_local_voices()          # 本地预置
+        self._load_user_added_voices()     # 用户添加（持久化）
+        self._load_web_voices(self.config) # 网页上传
         self._update_sorted_keys()
-
+        
         self.last_pool_len = len(self.config.get("extra_voice_pool", []))
+        
+        if self.auto_reply_voice_enabled:
+            logger.info("[AiriVoice] 已启用『bot 自发消息自动追加语音』功能（使用 on_decorating_result 钩子）")
 
+        # 仅在触发模式为 llm 时，注册供 LLM 使用的语音相关工具
         if self.trigger_mode == "llm":
             llm_tools = []
             if self.llm_select_mode == "list":
@@ -204,90 +248,32 @@ class AiriVoice(Star):
             else:
                 llm_tools.append(AiriSearchVoicesTool(plugin=self))
             llm_tools.append(AiriSendVoiceTool(plugin=self))
+
             try:
+                # AstrBot >= v4.5.1
                 self.context.add_llm_tools(*llm_tools)
-                logger.info(f"[AiriVoice] 已为 LLM 注册 {len(llm_tools)} 个语音工具，模式：{self.llm_select_mode}")
+                logger.info(
+                    f"[AiriVoice] 已为 LLM 注册 {len(llm_tools)} 个语音工具，模式：{self.llm_select_mode}"
+                )
             except Exception as e:
                 logger.error(f"[AiriVoice] 注册 LLM 工具失败：{e}")
-
-        # 尝试劫持 send_message
-        if self.auto_reply_voice_enabled:
-            try:
-                self._patch_send_message_for_auto_voice()
-                logger.info("[AiriVoice] 已启用 bot 自发消息 → 自动追发语音功能")
-            except Exception as e:
-                logger.error(f"[AiriVoice] 劫持 send_message 失败，自动追发功能不可用：{e}")
-
+        
         logger.info(f"[AiriVoice] 初始化完成，共 {len(self.voice_map)} 个语音，权限模式：{self.admin_mode}")
 
-    def _patch_send_message_for_auto_voice(self):
-        original_send = self.context.send_message
-
-        async def wrapped_send(origin: str, chain: MessageChain, **kwargs):
-            # 先执行原发送
-            result = await original_send(origin, chain, **kwargs)
-
-            if not self.auto_reply_voice_enabled:
-                return result
-
-            # 已有语音就不追发了（防循环）
-            if any(isinstance(seg, Record) for seg in chain):
-                return result
-
-            # 提取文本
-            text_parts = []
-            for seg in chain:
-                if hasattr(seg, "text"):
-                    text_parts.append(str(getattr(seg, "text", "") or ""))
-                elif isinstance(seg, str):
-                    text_parts.append(seg)
-
-            text = "".join(text_parts).strip()
-            if not text:
-                return result
-
-            logger.debug(f"[AiriVoice-auto] bot 发送文本: {text!r}")
-
-            # 宽松匹配，只发第一个命中的
-            for keyword in self.sorted_keys:
-                if keyword in text:
-                    path = self.voice_map.get(keyword)
-                    if not path:
-                        continue
-                    try:
-                        await self.context.send_message(
-                            origin,
-                            MessageChain([Record.fromFileSystem(path)])
-                        )
-                        logger.info(f"[AiriVoice-auto] 自动追发成功：'{keyword}' 在 '{text}' 中匹配 → {path}")
-                        break  # 只发一次
-                    except Exception as e:
-                        logger.error(f"[AiriVoice-auto] 追发失败 '{keyword}': {e}")
-                    # 不 return，继续让原消息发出
-
-            return result
-
-        self.context.send_message = wrapped_send
-
-    # 下面是原有方法（保持不变，省略部分以节省篇幅）
-
     def _get_user_id(self, event: AstrMessageEvent) -> Optional[str]:
+        """从事件中安全提取用户 ID"""
         try:
             return event.get_sender_id()
-        except:
+        except (AttributeError, TypeError):
             pass
+        
         try:
             return event.message_obj.sender.user_id
-        except:
+        except AttributeError:
             pass
+        
         user_id = getattr(event, 'sender_id', None) or getattr(event, 'user_id', None)
         return str(user_id) if user_id else None
-
-    # ... 其他原有方法保持不变 ...
-
-    # 只贴出你可能需要改的部分，其他方法请从你原来的代码复制过来
-
-    # 最后记得把 _load_xxx, voice_handler, voice_add 等方法都保留
 
     def _get_reply_id(self, event: AstrMessageEvent) -> Optional[int]:
         """获取被引用消息的 ID"""
@@ -553,6 +539,50 @@ class AiriVoice(Star):
             except Exception as e:
                 logger.error(f"[AiriVoice] 发送失败 '{keyword}': {e}")
                 yield event.plain_result(f"语音发送失败：{type(e).__name__}")
+
+    @filter.on_decorating_result()
+    async def on_bot_message_decorate(self, event: AstrMessageEvent):
+        """拦截 bot 即将发送的消息，宽松匹配关键词后自动追加语音"""
+        if not self.auto_reply_voice_enabled:
+            return
+
+        # 获取 bot 即将发送的结果
+        result = event.get_result()
+        if not result or not hasattr(result, "chain") or not result.chain:
+            return
+
+        # 提取纯文本 + 判断是否已有语音（防止循环）
+        text_parts = []
+        has_record = False
+        for seg in result.chain:
+            if isinstance(seg, Record):
+                has_record = True
+            elif hasattr(seg, "text"):
+                text_parts.append(str(getattr(seg, "text", "") or ""))
+            elif isinstance(seg, str):
+                text_parts.append(seg)
+
+        text = "".join(text_parts).strip()
+        if not text or has_record:
+            return
+
+        logger.debug(f"[AiriVoice-decorate] bot 即将发送文本: {text!r}")
+
+        # 宽松匹配（只追加第一个匹配的语音）
+        for keyword in self.sorted_keys:
+            if keyword in text:
+                path = self.voice_map.get(keyword)
+                if not path:
+                    continue
+                try:
+                    result.chain.append(Record.fromFileSystem(path))
+                    logger.info(f"[AiriVoice-decorate] ✅ 自动追加语音成功：'{keyword}' 在 '{text}' 中匹配")
+                    break  # 只加一个，防止刷屏
+                except Exception as e:
+                    logger.error(f"[AiriVoice-decorate] 追加语音失败 '{keyword}': {e}")
+
+        # 无需 yield 或 return，修改 result.chain 即可生效
+
 
     @filter.command("voice.add")
     async def voice_add(self, event: AstrMessageEvent, name: str):
