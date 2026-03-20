@@ -334,10 +334,10 @@ class AiriVoice(Star):
 
         # 新增：如果这条消息是插件自己发的文本（极少见），尝试补语音
         # 但实际中更推荐用下面的 /voice.send_text
-        if self.auto_catchphrase_enabled:
-            for part in event.get_messages():
-                if isinstance(part, Plain):
-                    yield from self._try_auto_send_catchphrase(event, part.text)
+        # if self.auto_catchphrase_enabled:
+        #     for part in event.get_messages():
+        #         if isinstance(part, Plain):
+        #             yield from self._try_auto_send_catchphrase(event, part.text)
 
     @filter.command("voice.send_text")
     async def send_text_with_auto_voice(self, event: AstrMessageEvent):
