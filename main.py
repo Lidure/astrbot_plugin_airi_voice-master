@@ -363,9 +363,146 @@ class AiriVoice(Star):
             return
 
         # 再检查补语音
-        yield from self._try_auto_send_catchphrase(event, text)
+        # yield from self._try_auto_send_catchphrase(event, text)
 
     # ... (其余命令如 voice.add, voice.delete, voice.list, voice.reload, voice.help, voice.check 保持不变)
+
+
+
+    @filter.command("voice.add")
+    async def voice_add(self, event: AstrMessageEvent, name: str):
+        """
+        通过引用语音消息添加新语音
+        用法：引用一条语音消息，然后发送 /voice.add 名字
+        """
+        # 权限检查
+        if not self._check_admin(event):
+            yield event.plain_result("❌ 权限不足：此命令仅限管理员使用")
+            return
+
+        # 检查是否有引用消息
+        if not self._get_reply_id(event):
+            yield event.plain_result("❌ 请引用一条语音消息后再使用此命令")
+            return
+
+        # 检查名字是否合法
+        if not name or name.strip() == "":
+            yield event.plain_result("❌ 请提供语音名称，例如：/voice.add 打卡啦摩托")
+            return
+
+        name = name.strip()
+
+        # 检查是否已存在
+        if name in self.voice_map:
+            yield event.plain_result(f"⚠️ 语音「{name}」已存在，如需覆盖请先删除旧语音")
+            return
+
+        # 获取音频 URL
+        audio_url = await self._get_audio_url(event)
+        if not audio_url:
+            yield event.plain_result("❌ 未能从引用的消息中提取到音频，请确保引用的是语音消息")
+            return
+
+        logger.debug(f"[AiriVoice] 获取到音频 URL: {audio_url}")
+
+        # 下载音频
+        audio_data = await self._download_audio(audio_url)
+        if not audio_data:
+            yield event.plain_result("❌ 音频下载失败，请稍后重试")
+            return
+
+        # 保存到持久化目录（user_added）
+        ext = self._get_file_ext_from_url(audio_url)
+        file_path = self.user_added_dir / f"{name}{ext}"
+
+        try:
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+            
+            self.voice_map[name] = str(file_path)
+            self._update_sorted_keys()
+            
+            yield event.plain_result(f"✅ 语音「{name}」添加成功！\n📁 文件：{name}{ext}\n💾 大小：{len(audio_data) / 1024:.2f} KB")
+        except Exception as e:
+            logger.error(f"[AiriVoice] 保存语音失败：{e}")
+            yield event.plain_result(f"❌ 保存语音失败：{str(e)}")
+
+    @filter.command("voice.delete")
+    async def voice_delete(self, event: AstrMessageEvent, name: str):
+        """删除语音"""
+        if not self._check_admin(event):
+            yield event.plain_result("❌ 权限不足：此命令仅限管理员使用")
+            return
+
+        if name not in self.voice_map:
+            yield event.plain_result(f"❌ 语音「{name}」不存在")
+            return
+
+        file_path = Path(self.voice_map[name])
+        
+        # 只允许删除 user_added 目录下的文件
+        if not str(file_path.resolve()).startswith(str(self.user_added_dir.resolve())):
+            yield event.plain_result(f"⚠️ 只能删除通过 /voice.add 添加的语音，本地 voices/ 和网页上传的文件请手动管理")
+            return
+
+        try:
+            file_path.unlink()
+            del self.voice_map[name]
+            self._update_sorted_keys()
+            
+            yield event.plain_result(f"✅ 语音「{name}」已删除")
+        except Exception as e:
+            logger.error(f"[AiriVoice] 删除语音失败：{e}")
+            yield event.plain_result(f"❌ 删除失败：{str(e)}")
+
+    @filter.command("voice.list")
+    async def list_voices(self, event: AstrMessageEvent):
+        """列出所有语音关键词"""
+        if not self.sorted_keys:
+            yield event.plain_result("当前没有可用语音～\n将语音文件放入 voices/ 目录或通过网页上传")
+            return
+
+        args = (event.message_str or "").strip().split()
+        page = max(1, int(args[1])) if len(args) > 1 and args[1].isdigit() else 1
+        
+        total = len(self.sorted_keys)
+        total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        
+        if page > total_pages:
+            yield event.plain_result(f"页码过大～总共 {total_pages} 页")
+            return
+
+        start = (page - 1) * PAGE_SIZE
+        page_keys = self.sorted_keys[start:start + PAGE_SIZE]
+
+        msg = f"📋 可用语音（第 {page}/{total_pages} 页，共 {total} 个）：\n\n"
+        msg += "\n".join(f"• {k}" for k in page_keys)
+
+        if total_pages > 1:
+            nav = []
+            if page > 1:
+                nav.append(f"/voice.list {page-1} ← 上一页")
+            if page < total_pages:
+                nav.append(f"/voice.list {page+1} → 下一页")
+            msg += "\n\n" + "  |  ".join(nav)
+
+        yield event.plain_result(msg)
+
+    @filter.command("voice.reload")
+    async def reload_voices(self, event: AstrMessageEvent):
+        """重新加载语音列表（需要管理员权限）"""
+        if not self._check_admin(event):
+            yield event.plain_result("❌ 权限不足：此命令仅限管理员使用")
+            return
+        
+        self._load_local_voices()
+        self._load_web_voices(self.config)
+        self._update_sorted_keys()
+        self.last_pool_len = len(self.config.get("extra_voice_pool", []))
+        
+        yield event.plain_result(f"✅ 已重新加载，共 {len(self.voice_map)} 个语音")
+
+
 
     @filter.command("voice.help")
     async def help(self, event: AstrMessageEvent):
