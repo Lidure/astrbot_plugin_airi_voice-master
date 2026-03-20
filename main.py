@@ -9,7 +9,7 @@ from pydantic.dataclasses import dataclass
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter, MessageChain
-from astrbot.api.message_components import Record, Reply, Plain
+from astrbot.api.message_components import Record, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
@@ -38,6 +38,7 @@ class AiriListAllVoicesTool(FunctionTool[AstrAgentContext]):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
+        # 仅在插件触发模式为 llm 时生效，其他模式下工具只返回给 LLM 的提示文本
         if not self.plugin or getattr(self.plugin, "trigger_mode", None) != "llm":
             return "当前未开启 LLM 触发模式，本工具暂不可用。"
 
@@ -138,6 +139,7 @@ class AiriSendVoiceTool(FunctionTool[AstrAgentContext]):
         if not path:
             return f"语音「{name}」不存在，请先使用列出/搜索工具确认可用名称。"
 
+        # 在 Tool 内部直接发送语音消息（对用户来说仍然是一次回复中的语音）
         try:
             agent_ctx = context.context.context
             event = context.context.event
@@ -154,6 +156,7 @@ class AiriSendVoiceTool(FunctionTool[AstrAgentContext]):
                 MessageChain([Record.fromFileSystem(path)]),
             )
             logger.debug(f"[AiriVoice] LLM 工具发送语音：'{name}' → {path}")
+            # 不再给用户增加额外文字，只让 LLM 负责一句话内容
             return ""
         except FileNotFoundError as e:
             logger.error(f"[AiriVoice] 文件不存在（LLM 工具） '{name}': {e}")
@@ -166,9 +169,9 @@ class AiriSendVoiceTool(FunctionTool[AstrAgentContext]):
 @register(
     "airi_voice",
     "lidure",
-    "输入关键词发送对应语音 + 支持口癖自动补发语音",
+    "输入关键词发送对应语音",
     "2.3",
-    "https://github.com/Lidure/astrbot_plugin_airi_voice/",
+    "https://github.com/Lidure/astrbot_plugin_airi_voice",
 )
 class AiriVoice(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -221,19 +224,7 @@ class AiriVoice(Star):
                 f"[AiriVoice] 无效 llm_select_mode，强制使用 list"
             )
             self.llm_select_mode = "list"
-
-        # 新增：口癖自动补语音配置
-        catch_config = self.config.get("auto_catchphrase", {})
-        self.auto_catchphrase_enabled = catch_config.get("enabled", False)
-        self.catchphrase_mode = catch_config.get("mode", "first")  # first, random, all
-        self.catchphrase_map: Dict[str, List[str]] = catch_config.get("map", {})
-        self.catchphrase_max_per_msg = max(1, min(5, catch_config.get("max_per_message", 2)))
-
-        if self.auto_catchphrase_enabled:
-            logger.info(f"[AiriVoice] 口癖自动补语音已启用，关键词数：{len(self.catchphrase_map)}，模式：{self.catchphrase_mode}")
-        else:
-            logger.info("[AiriVoice] 口癖自动补语音未启用")
-
+        
         # 语音映射
         self.voice_map: Dict[str, str] = {}
         self.sorted_keys: List[str] = []
@@ -243,7 +234,8 @@ class AiriVoice(Star):
         self._load_user_added_voices()     # 用户添加（持久化）
         self._load_web_voices(self.config) # 网页上传
         self._update_sorted_keys()
-        
+        self._patch_send_message()
+
         self.last_pool_len = len(self.config.get("extra_voice_pool", []))
         
         # 仅在触发模式为 llm 时，注册供 LLM 使用的语音相关工具
@@ -265,6 +257,64 @@ class AiriVoice(Star):
                 logger.error(f"[AiriVoice] 注册 LLM 工具失败：{e}")
         
         logger.info(f"[AiriVoice] 初始化完成，共 {len(self.voice_map)} 个语音，权限模式：{self.admin_mode}")
+
+    def _patch_send_message(self):
+        """替换 context 的 send_message 方法，实现在 bot 发消息后检查关键词自动追发语音"""
+        original_send = self.context.send_message
+        
+        async def wrapped_send(origin: str, chain: MessageChain, **kwargs):
+            # 先执行原发送
+            result = await original_send(origin, chain, **kwargs)
+            
+            # 只处理纯文本 + 可能的 at / reply 等简单组合的消息
+            # 避免对已经包含 Record 的消息再追加（防止无限循环）
+            has_record = any(isinstance(seg, Record) for seg in chain)
+            if has_record:
+                return result  # 已包含语音的消息不再追发
+            
+            # 提取纯文本内容
+            text_parts = []
+            for seg in chain:
+                if hasattr(seg, "text"):
+                    text_parts.append(str(seg.text or ""))
+                elif isinstance(seg, str):
+                    text_parts.append(seg)
+            
+            text = "".join(text_parts).strip()
+            if not text:
+                return result
+            
+            # ─── 检查是否命中语音关键词 ───
+            keyword = text.strip()
+            matched_path = self.voice_map.get(keyword)
+            
+            # 如果是「一句话 + 关键词」这种常见情况，也可以考虑更宽松匹配
+            # 这里先用最严格的：整条消息就是关键词
+            if matched_path:
+                try:
+                    # 直接发送语音，不带额外文字
+                    await self.context.send_message(
+                        origin,
+                        MessageChain([Record.fromFileSystem(matched_path)])
+                    )
+                    logger.debug(f"[AiriVoice] 自动追发语音（bot自发消息触发）：'{keyword}' → {matched_path}")
+                except Exception as e:
+                    logger.error(f"[AiriVoice] 自动追发语音失败 '{keyword}': {e}")
+            
+            # 可选：更宽松匹配（消息中包含关键词）
+            else:
+                for k, path in self.voice_map.items():
+                    if k in text:
+                        await self.context.send_message(origin, MessageChain([Record.fromFileSystem(path)]))
+                        logger.debug(f"[AiriVoice] 宽松匹配自动追发：'{k}' in '{text}'")
+                        break
+            
+            return result
+        
+        # 替换
+        self.context.send_message = wrapped_send
+        logger.info("[AiriVoice] 已启用 bot 自发消息 → 自动追发语音功能")
+
 
     def _get_user_id(self, event: AstrMessageEvent) -> Optional[str]:
         """从事件中安全提取用户 ID"""
@@ -369,6 +419,7 @@ class AiriVoice(Star):
         if count > 0:
             logger.info(f"[AiriVoice] 从本地加载 {count} 个语音")
 
+        
     def _load_user_added_voices(self):
         """加载用户通过 voice.add 添加的语音（持久化，重启不丢）"""
         count = 0
@@ -456,45 +507,6 @@ class AiriVoice(Star):
             return False
         
         return False
-
-    def _try_auto_send_catchphrase(self, event: AstrMessageEvent, text: str):
-        """检查文本是否包含口癖关键词，并补发对应语音"""
-        if not self.auto_catchphrase_enabled:
-            return
-
-        matched_voices = []
-
-        for keyword, voice_list in self.catchphrase_map.items():
-            if keyword in text:
-                if self.catchphrase_mode == "all":
-                    matched_voices.extend(voice_list)
-                elif self.catchphrase_mode == "random":
-                    if voice_list:
-                        matched_voices.append(random.choice(voice_list))
-                else:  # first
-                    if voice_list:
-                        matched_voices.append(voice_list[0])
-
-        if not matched_voices:
-            return
-
-        # 限制最大补发条数，避免刷屏
-        matched_voices = matched_voices[:self.catchphrase_max_per_msg]
-        random.shuffle(matched_voices)
-
-        sent_count = 0
-        for vname in matched_voices:
-            path = self.voice_map.get(vname)
-            if not path or not Path(path).exists():
-                logger.warning(f"[AiriVoice auto] 语音文件不存在：{vname}")
-                continue
-
-            try:
-                yield event.chain_result([Record.fromFileSystem(path)])
-                logger.info(f"[AiriVoice auto] 已补发语音：{vname} （因关键词：{keyword}）")
-                sent_count += 1
-            except Exception as e:
-                logger.error(f"[AiriVoice auto] 补发失败 {vname}: {e}")
 
     @filter.regex(r"^\s*.+\s*$")
     async def voice_handler(self, event: AstrMessageEvent):
@@ -584,45 +596,49 @@ class AiriVoice(Star):
                 logger.error(f"[AiriVoice] 发送失败 '{keyword}': {e}")
                 yield event.plain_result(f"语音发送失败：{type(e).__name__}")
 
-        # 新增：检查插件自己产生的文本消息是否触发口癖（针对 Plain 文本部分）
-        if self.auto_catchphrase_enabled:
-            for seg in event.get_messages():
-                if isinstance(seg, Plain):
-                    yield from self._try_auto_send_catchphrase(event, seg.text)
-
     @filter.command("voice.add")
     async def voice_add(self, event: AstrMessageEvent, name: str):
         """
         通过引用语音消息添加新语音
         用法：引用一条语音消息，然后发送 /voice.add 名字
         """
+        # 权限检查
         if not self._check_admin(event):
             yield event.plain_result("❌ 权限不足：此命令仅限管理员使用")
             return
 
+        # 检查是否有引用消息
         if not self._get_reply_id(event):
             yield event.plain_result("❌ 请引用一条语音消息后再使用此命令")
             return
 
-        name = name.strip()
-        if not name:
+        # 检查名字是否合法
+        if not name or name.strip() == "":
             yield event.plain_result("❌ 请提供语音名称，例如：/voice.add 打卡啦摩托")
             return
 
+        name = name.strip()
+
+        # 检查是否已存在
         if name in self.voice_map:
             yield event.plain_result(f"⚠️ 语音「{name}」已存在，如需覆盖请先删除旧语音")
             return
 
+        # 获取音频 URL
         audio_url = await self._get_audio_url(event)
         if not audio_url:
             yield event.plain_result("❌ 未能从引用的消息中提取到音频，请确保引用的是语音消息")
             return
 
+        logger.debug(f"[AiriVoice] 获取到音频 URL: {audio_url}")
+
+        # 下载音频
         audio_data = await self._download_audio(audio_url)
         if not audio_data:
             yield event.plain_result("❌ 音频下载失败，请稍后重试")
             return
 
+        # 保存到持久化目录（user_added）
         ext = self._get_file_ext_from_url(audio_url)
         file_path = self.user_added_dir / f"{name}{ext}"
 
@@ -651,6 +667,7 @@ class AiriVoice(Star):
 
         file_path = Path(self.voice_map[name])
         
+        # 只允许删除 user_added 目录下的文件
         if not str(file_path.resolve()).startswith(str(self.user_added_dir.resolve())):
             yield event.plain_result(f"⚠️ 只能删除通过 /voice.add 添加的语音，本地 voices/ 和网页上传的文件请手动管理")
             return
@@ -712,33 +729,6 @@ class AiriVoice(Star):
         
         yield event.plain_result(f"✅ 已重新加载，共 {len(self.voice_map)} 个语音")
 
-    @filter.command("voice.send_text")
-    async def send_text_with_catchphrase(self, event: AstrMessageEvent):
-        """
-        发送一段文本，并自动检查口癖关键词补发语音
-        用法示例：/voice.send_text 今天也打卡啦摩托～好开心！
-        （仅管理员可用，主要用于测试）
-        """
-        if not self._check_admin(event):
-            yield event.plain_result("❌ 此命令仅限管理员使用")
-            return
-
-        text = (event.message_str or "").strip()
-        text = re.sub(r'^/voice\.send_text\s*', '', text).strip()
-        if not text:
-            yield event.plain_result("请在命令后输入要发送的文本内容")
-            return
-
-        # 先发送文本
-        try:
-            yield event.chain_result([Plain(text)])
-        except Exception as e:
-            yield event.plain_result(f"发送文本失败：{str(e)}")
-            return
-
-        # 再检查并补发语音
-        yield from self._try_auto_send_catchphrase(event, text)
-
     @filter.command("voice.help")
     async def help(self, event: AstrMessageEvent):
         """显示帮助信息"""
@@ -749,12 +739,9 @@ class AiriVoice(Star):
             "❓ /voice.help - 显示此帮助",
         ]
         if is_admin:
-            commands.extend([
-                "➕ /voice.add 名字 - 引用语音消息添加新语音",
-                "🗑️ /voice.delete 名字 - 删除语音",
-                "🔄 /voice.reload - 重新加载语音列表",
-                "💬 /voice.send_text 内容 - 发送文本并自动补口癖语音（测试用）",
-            ])
+            commands.append("➕ /voice.add 名字 - 引用语音消息添加新语音 (管理员)")
+            commands.append("🗑️ /voice.delete 名字 - 删除语音 (管理员)")
+            commands.append("🔄 /voice.reload - 重新加载语音列表 (管理员)")
         
         help_msg = f"""🌸 AiriVoice 语音插件
 
@@ -763,25 +750,11 @@ class AiriVoice(Star):
 2. 或在 AstrBot 网页后台 → 插件配置 → 上传语音
 3. 或引用语音消息发送 /voice.add 名字
 4. 文件名即为关键词（不含扩展名）
-5. 直接输入关键词即可发送语音（direct 模式）
+5. 直接输入关键词即可发送语音
 
 【触发模式】
 🔹 direct: 直接输入关键词触发
 🔹 prefix: 使用 #voice 关键词 触发
-🔹 llm: 通过 LLM 工具选择语音
-
-【新功能：口癖自动补语音】
-在插件配置中开启 auto_catchphrase 后，
-当 bot 发送的文本包含指定关键词时，会自动额外发送对应语音。
-配置示例：
-"auto_catchphrase": {{
-  "enabled": true,
-  "mode": "first",
-  "map": {{
-    "打卡啦摩托": ["打卡啦摩托语音"],
-    "哎嘿~": ["哎嘿短"]
-  }}
-}}
 
 【命令】
 {chr(10).join(commands)}"""
