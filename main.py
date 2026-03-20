@@ -620,6 +620,11 @@ class AiriVoice(Star):
         if not text or has_record_already:
             return  # 已包含语音或无文本 → 不处理
 
+        # 新增：过滤插件自己的命令回复，避免自我触发
+        if "可用语音" in text or "第" in text and "页" in text or "/voice.list" in text:
+            logger.debug("[AiriVoice-auto] 检测到 /voice.list 回复，跳过自动追加语音")
+            return
+
         logger.debug(f"[AiriVoice-auto] bot 回复文本待检查: {text!r}")
 
         for keyword in self.sorted_keys:
