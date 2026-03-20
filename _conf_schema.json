@@ -25,6 +25,12 @@
     "type": "file",
     "default": []
   },
+  "auto_reply_voice_on_bot_message": {
+  "description": "当 bot 自己发消息时，自动检测关键词并发语音",
+  "type": "boolean",
+  "default": false,
+  "hint": "开启后，bot 自己发送的纯文本消息如果包含已注册的语音关键词，会自动追发对应语音（防止刷屏建议谨慎开启）"
+  },
   "llm_select_mode": {
     "description": "LLM 语音选择模式",
     "type": "string",

@@ -234,10 +234,18 @@ class AiriVoice(Star):
         self._load_user_added_voices()     # 用户添加（持久化）
         self._load_web_voices(self.config) # 网页上传
         self._update_sorted_keys()
-        self._patch_send_message()
-
+        self.config = config or {}
+                # 新增：自动追发开关（默认关闭）
+        self.auto_reply_voice_enabled = self.config.get("auto_reply_voice_on_bot_message", False)
         self.last_pool_len = len(self.config.get("extra_voice_pool", []))
         
+        # ───────────── 新增：如果开启了自动追发，则进行 send_message 劫持 ─────────────
+        if self.auto_reply_voice_enabled:
+            self._patch_send_message_for_auto_voice()
+            logger.info("[AiriVoice] 已启用『bot 自发消息自动追发语音』功能")
+        else:
+            logger.info("[AiriVoice] 『bot 自发消息自动追发语音』功能已关闭")
+
         # 仅在触发模式为 llm 时，注册供 LLM 使用的语音相关工具
         if self.trigger_mode == "llm":
             llm_tools = []
@@ -257,64 +265,6 @@ class AiriVoice(Star):
                 logger.error(f"[AiriVoice] 注册 LLM 工具失败：{e}")
         
         logger.info(f"[AiriVoice] 初始化完成，共 {len(self.voice_map)} 个语音，权限模式：{self.admin_mode}")
-
-    def _patch_send_message(self):
-        """替换 context 的 send_message 方法，实现在 bot 发消息后检查关键词自动追发语音"""
-        original_send = self.context.send_message
-        
-        async def wrapped_send(origin: str, chain: MessageChain, **kwargs):
-            # 先执行原发送
-            result = await original_send(origin, chain, **kwargs)
-            
-            # 只处理纯文本 + 可能的 at / reply 等简单组合的消息
-            # 避免对已经包含 Record 的消息再追加（防止无限循环）
-            has_record = any(isinstance(seg, Record) for seg in chain)
-            if has_record:
-                return result  # 已包含语音的消息不再追发
-            
-            # 提取纯文本内容
-            text_parts = []
-            for seg in chain:
-                if hasattr(seg, "text"):
-                    text_parts.append(str(seg.text or ""))
-                elif isinstance(seg, str):
-                    text_parts.append(seg)
-            
-            text = "".join(text_parts).strip()
-            if not text:
-                return result
-            
-            # ─── 检查是否命中语音关键词 ───
-            keyword = text.strip()
-            matched_path = self.voice_map.get(keyword)
-            
-            # 如果是「一句话 + 关键词」这种常见情况，也可以考虑更宽松匹配
-            # 这里先用最严格的：整条消息就是关键词
-            if matched_path:
-                try:
-                    # 直接发送语音，不带额外文字
-                    await self.context.send_message(
-                        origin,
-                        MessageChain([Record.fromFileSystem(matched_path)])
-                    )
-                    logger.debug(f"[AiriVoice] 自动追发语音（bot自发消息触发）：'{keyword}' → {matched_path}")
-                except Exception as e:
-                    logger.error(f"[AiriVoice] 自动追发语音失败 '{keyword}': {e}")
-            
-            # 可选：更宽松匹配（消息中包含关键词）
-            else:
-                for k, path in self.voice_map.items():
-                    if k in text:
-                        await self.context.send_message(origin, MessageChain([Record.fromFileSystem(path)]))
-                        logger.debug(f"[AiriVoice] 宽松匹配自动追发：'{k}' in '{text}'")
-                        break
-            
-            return result
-        
-        # 替换
-        self.context.send_message = wrapped_send
-        logger.info("[AiriVoice] 已启用 bot 自发消息 → 自动追发语音功能")
-
 
     def _get_user_id(self, event: AstrMessageEvent) -> Optional[str]:
         """从事件中安全提取用户 ID"""
@@ -507,6 +457,60 @@ class AiriVoice(Star):
             return False
         
         return False
+
+    def _patch_send_message_for_auto_voice(self):
+        """劫持 context.send_message，在 bot 自己发送纯文本消息后检查是否包含关键词"""
+        original_send = self.context.send_message
+        
+        async def wrapped_send(origin: str, chain: MessageChain, **kwargs):
+            # 先正常发送
+            result = await original_send(origin, chain, **kwargs)
+            
+            # 如果功能关闭了，直接返回（虽然 init 里已经判断，但双保险）
+            if not self.auto_reply_voice_enabled:
+                return result
+            
+            # 如果这条消息本身已经包含语音，就不再追发（防止无限循环）
+            if any(isinstance(seg, Record) for seg in chain):
+                return result
+            
+            # 提取纯文本内容
+            text_parts = []
+            for seg in chain:
+                if hasattr(seg, "text"):
+                    text_parts.append(str(getattr(seg, "text", "") or ""))
+                elif isinstance(seg, str):
+                    text_parts.append(seg)
+            
+            text = "".join(text_parts).strip()
+            if not text:
+                return result
+            
+            # ─── 宽松匹配：只要包含任意一个关键词就触发（只发第一个匹配的） ───
+            matched = False
+            for keyword in self.sorted_keys:          # sorted_keys 是已排序的关键词列表
+                if keyword in text:
+                    path = self.voice_map.get(keyword)
+                    if not path:
+                        continue
+                    try:
+                        await self.context.send_message(
+                            origin,
+                            MessageChain([Record.fromFileSystem(path)])
+                        )
+                        logger.debug(
+                            f"[AiriVoice] bot 自发消息自动追发语音：'{keyword}' 在 '{text}' 中匹配 → {path}"
+                        )
+                        matched = True
+                        break   # 只触发一次，防止刷屏
+                    except Exception as e:
+                        logger.error(f"[AiriVoice] 自动追发语音失败 '{keyword}': {e}")
+                        # 不中断，继续返回原结果
+            
+            return result
+        
+        # 替换原方法
+        self.context.send_message = wrapped_send
 
     @filter.regex(r"^\s*.+\s*$")
     async def voice_handler(self, event: AstrMessageEvent):
