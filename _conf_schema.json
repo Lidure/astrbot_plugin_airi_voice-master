@@ -14,22 +14,63 @@
     "options": ["all", "admin", "whitelist"]
   },
   "admin_whitelist": {
-   "description": "管理员白名单",
-   "type": "text",
-   "hint": "每行一个用户 ID 或昵称，仅当 admin_mode 为 whitelist 时生效",
-   "default": ""
+    "description": "管理员白名单",
+    "type": "text",
+    "hint": "每行一个用户 ID 或昵称，仅当 admin_mode 为 whitelist 时生效",
+    "default": ""
   },
   "extra_voice_pool": {
-   "description": "额外语音文件池（网页上传）",
-   "hint": "上传 mp3/wav 等文件，文件名（去后缀）作为触发关键词。支持多文件上传。",
-   "type": "file",
-   "default": []
+    "description": "额外语音文件池（网页上传）",
+    "hint": "上传 mp3/wav 等文件，文件名（去后缀）作为触发关键词。支持多文件上传。",
+    "type": "file",
+    "default": []
   },
   "llm_select_mode": {
-   "description": "LLM 语音选择模式",
-   "type": "string",
-   "hint": "list: 先列出全部语音供 LLM 选择；keyword: LLM 根据用户给出的关键词筛选语音",
-   "default": "list",
-   "options": ["list", "keyword"]
+    "description": "LLM 语音选择模式",
+    "type": "string",
+    "hint": "list: 先列出全部语音供 LLM 选择；keyword: LLM 根据用户给出的关键词筛选语音",
+    "default": "list",
+    "options": ["list", "keyword"]
+  },
+  "auto_catchphrase": {
+    "description": "口癖自动补发语音（bot 自己发的文本包含关键词时自动补语音）",
+    "type": "object",
+    "default": {
+      "enabled": false,
+      "mode": "first",
+      "max_per_message": 2,
+      "map": {}
+    },
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "是否开启此功能",
+        "default": false
+      },
+      "mode": {
+        "type": "string",
+        "description": "匹配到关键词后发送语音的方式",
+        "default": "first",
+        "enum": ["first", "random", "all"]
+      },
+      "max_per_message": {
+        "type": "integer",
+        "description": "每条消息最多补发几条语音（防刷屏）",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 5
+      },
+      "map": {
+        "type": "object",
+        "description": "关键词 → 语音名称列表 的映射",
+        "default": {},
+        "additionalProperties": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
   }
 }
