@@ -1,0 +1,67 @@
+{
+  "trigger_mode": {
+    "description": "触发模式",
+    "type": "string",
+    "hint": "direct: 直接输入关键词；prefix: 必须用 #voice 前缀；llm: 仅注册 LLM 工具，由大模型调用语音功能",
+    "default": "direct",
+    "options": ["direct", "prefix", "llm"]
+  },
+  "admin_mode": {
+    "description": "管理命令权限模式",
+    "type": "string",
+    "hint": "all: 所有人可用；admin: 仅平台管理员；whitelist: 仅白名单用户",
+    "default": "whitelist",
+    "options": ["all", "admin", "whitelist"]
+  },
+  "admin_whitelist": {
+   "description": "管理员白名单",
+   "type": "text",
+   "hint": "每行一个用户 ID 或昵称，仅当 admin_mode 为 whitelist 时生效",
+   "default": ""
+  },
+  "extra_voice_pool": {
+   "description": "额外语音文件池（网页上传）",
+   "hint": "上传 mp3/wav 等文件，文件名（去后缀）作为触发关键词。支持多文件上传。",
+   "type": "file",
+   "default": []
+  },
+  "llm_select_mode": {
+   "description": "LLM 语音选择模式",
+   "type": "string",
+   "hint": "list: 先列出全部语音供 LLM 选择；keyword: LLM 根据用户给出的关键词筛选语音",
+   "default": "list",
+   "options": ["list", "keyword"]
+  },
+  
+  "auto_voice_on_catchphrase": {
+    "type": "object",
+    "title": "文本口癖自动补发语音（只对机器人自己消息生效）",
+    "default": {
+      "enabled": false,
+      "max_per_message": 2,
+      "mode": "random",               
+      "keyword_map": {
+        "打卡啦摩托": ["打卡啦摩托"],
+        "哎嘿~": ["哎嘿短", "哎嘿长版"],
+        "才不是呢": ["才不是呢-傲娇", "哼才不是"],
+        "汪！": ["汪大吼"],
+        "吵死了": ["吵死了","吵死了-生气", "无路赛"]
+      }
+    },
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "max_per_message": { "type": "integer", "minimum": 1, "maximum": 5 },
+      "mode": { "type": "string", "enum": ["first", "random", "all"] },
+      "keyword_map": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+  
+
+  
+}
