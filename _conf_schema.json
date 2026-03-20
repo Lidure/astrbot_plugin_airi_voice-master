@@ -51,8 +51,7 @@
         "type": "string",
         "description": "匹配到关键词后如何选择语音",
         "default": "first",
-        "options": ["first", "random", "all"],
-        "hint": "first: 只发第一个；random: 随机发一个；all: 全部发（小心刷屏）"
+        "enum": ["first", "random", "all"]
       },
       "max_per_message": {
         "type": "integer",
@@ -65,11 +64,12 @@
         "type": "object",
         "description": "关键词 → 语音名称列表 的映射",
         "default": {},
-        "hint": "key: 口癖关键词（支持包含标点），value: 语音名称数组（必须已在 voice_map 中存在）\n示例：\n\"打卡啦摩托\": [\"打卡啦摩托语音\"],\n\"哎嘿~\": [\"哎嘿短\", \"哎嘿长版\"]",
         "additionalProperties": {
           "type": "array",
+          "description": "语音名称数组",
           "items": {
-            "type": "string"
+            "type": "string",
+            "description": "语音名称（必须已在 voice_map 中存在）"
           }
         }
       }
