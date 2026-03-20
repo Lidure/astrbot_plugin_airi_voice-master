@@ -201,7 +201,7 @@ class AiriVoice(Star):
         if self.trigger_mode not in {"prefix", "direct", "llm"}:
             logger.warning(f"[AiriVoice] 无效 trigger_mode，强制使用 direct")
             self.trigger_mode = "direct"
-        
+        self.config = config or {}
         # 权限控制
         self.admin_mode = self.config.get("admin_mode", "whitelist")
         if self.admin_mode not in {"all", "admin", "whitelist"}:
